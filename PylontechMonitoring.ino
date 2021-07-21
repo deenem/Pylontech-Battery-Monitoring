@@ -7,24 +7,24 @@
 #include <TimeLib.h> //https://github.com/PaulStoffregen/Time
 #include <ntp_time.h>
 #include <circular_log.h>
-
+#include <DateTime.h>
 
 //IMPORTANT: Specify your WIFI settings:
-#define WIFI_SSID "--YOUR SSID HERE --"
-#define WIFI_PASS "-- YOUR PASSWORD HERE --"
+#define WIFI_SSID <YOUR_SSID>
+#define WIFI_PASS <YOUR_PWD>
 
 //IMPORTANT: Uncomment this line if you want to enable MQTT (and fill correct MQTT_ values below):
-//#define ENABLE_MQTT
+#define ENABLE_MQTT
 
 #ifdef ENABLE_MQTT
 //NOTE 1: if you want to change what is pushed via MQTT - edit function: pushBatteryDataToMqtt.
 //NOTE 2: MQTT_TOPIC_ROOT is where battery will push MQTT topics. For example "soc" will be pushed to: "home/grid_battery/soc"
-#define MQTT_SERVER        "192.168.0.6"
+#define MQTT_SERVER        <YOUR_MQTT_SERVER<
 #define MQTT_PORT          1883
 #define MQTT_USER          ""
 #define MQTT_PASSWORD      ""
 #define MQTT_TOPIC_ROOT    "home/grid_battery/"  //this is where mqtt data will be pushed
-#define MQTT_PUSH_FREQ_SEC 2  //maximum mqtt update frequency in seconds
+#define MQTT_PUSH_FREQ_SEC 10  //maximum mqtt update frequency in seconds
 
 #include <PubSubClient.h>
 WiFiClient espClient;
@@ -32,6 +32,7 @@ PubSubClient mqttClient(espClient);
 #endif //ENABLE_MQTT
 
 char g_szRecvBuff[7000];
+
 
 ESP8266WebServer server(80);
 SimpleTimer timer;
@@ -342,17 +343,24 @@ void wakeUpConsole()
 
 #define MAX_PYLON_BATTERIES 8
 
+// Battery capacities in Ah
+double battCapacity[MAX_PYLON_BATTERIES] = {74.0,74.0,74.0,74.0, 74.0,74.0,74.0,74.0};
+
 struct pylonBattery
 {
   bool isPresent;
   long  soc;     //Coulomb in %
-  long  voltage; //in mW
-  long  current; //in mA, negative value is discharge
-  long  tempr;   //temp of case or BMS?
+  double  voltage; //in V
+  double  current; //in A, negative value is discharge
+  double  tempr;   //temp of case or BMS?
   long  cellTempLow;
   long  cellTempHigh;
   long  cellVoltLow;
   long  cellVoltHigh;
+  double hoursToCharge;
+  double hoursToDischarge;
+  char socPoints[100];
+  double capacity; //AH
   char baseState[9];    //Charge | Dischg | Idle
   char voltageState[9]; //Normal
   char currentState[9]; //Normal
@@ -390,10 +398,12 @@ struct batteryStack
   int batteryCount;
   int soc;  //in %, if charging: average SOC, otherwise: lowest SOC
   int temp; //in mC, if highest temp is > 15C, this will show the highest temp, otherwise the lowest
-  long currentDC;    //mAh current going in or out of the battery
-  long avgVoltage;    //in mV
+  double currentDC;    //Ah current going in or out of the battery
+  double avgVoltage;    //in V
   char baseState[9];  //Charge | Dischg | Idle | Balance | Alarm!
-
+  double hoursToCharge;
+  double hoursToDischarge;
+  
   pylonBattery batts[MAX_PYLON_BATTERIES];
 
   bool isNormal() const
@@ -411,15 +421,15 @@ struct batteryStack
   }
 
   //in wH
-  long getPowerDC() const
+  double getPowerDC() const
   {
-    return (long)(((double)currentDC/1000.0)*((double)avgVoltage/1000.0));
+    return (currentDC*avgVoltage);
   }
 
   //wH estimated current on AC side (taking into account Sofar ME3000SP losses)
   long getEstPowerAc() const
   {
-    double powerDC = (double)getPowerDC();
+    double powerDC = getPowerDC();
     if(powerDC == 0)
     {
       return 0;
@@ -524,14 +534,18 @@ bool parsePwrResponse(const char* pStr)
   int socLow       = 0;
   int tempHigh     = 0;
   int tempLow      = 0;
-
+  double hoursToCharge = 0;
+  double hoursToDischarge = 0;
+  
   memset(&g_stack, 0, sizeof(g_stack));
 
   for(int ix=0; ix<MAX_PYLON_BATTERIES; ix++)
   {
     char szToFind[32] = "";
     snprintf(szToFind, sizeof(szToFind)-1, "\r\r\n%d     ", ix+1);
+    double to0 = 0, to20=0, to40=0, to60=0, to80=0, to100=0;
 
+    g_stack.batts[ix].capacity = battCapacity[ix];
     const char* pLineStart = strstr(pStr, szToFind);
     if(pLineStart == NULL)
     {
@@ -554,9 +568,9 @@ bool parsePwrResponse(const char* pStr)
       extractStr(pLineStart, 100, g_stack.batts[ix].time, sizeof(g_stack.batts[ix].time));
       extractStr(pLineStart, 121, g_stack.batts[ix].b_v_st, sizeof(g_stack.batts[ix].b_v_st));
       extractStr(pLineStart, 130, g_stack.batts[ix].b_t_st, sizeof(g_stack.batts[ix].b_t_st));
-      g_stack.batts[ix].voltage = extractInt(pLineStart, 6);
-      g_stack.batts[ix].current = extractInt(pLineStart, 13);
-      g_stack.batts[ix].tempr   = extractInt(pLineStart, 20);
+      g_stack.batts[ix].voltage = (double)extractInt(pLineStart, 6)/(double)1000;
+      g_stack.batts[ix].current = (double)extractInt(pLineStart, 13)/(double)1000;
+      g_stack.batts[ix].tempr   = (double)extractInt(pLineStart, 20)/(double)1000;
       g_stack.batts[ix].cellTempLow    = extractInt(pLineStart, 27);
       g_stack.batts[ix].cellTempHigh   = extractInt(pLineStart, 34);
       g_stack.batts[ix].cellVoltLow    = extractInt(pLineStart, 41);
@@ -569,9 +583,34 @@ bool parsePwrResponse(const char* pStr)
       g_stack.avgVoltage += g_stack.batts[ix].voltage;
       socAvg += g_stack.batts[ix].soc;
 
+
+      // calculate the hours to each of 0, 20,40,60,80,100 %
+      
       if(g_stack.batts[ix].isNormal() == false){ alarmCnt++; }
-      else if(g_stack.batts[ix].isCharging()){chargeCnt++;}
-      else if(g_stack.batts[ix].isDischarging()){dischargeCnt++;}
+      else if(g_stack.batts[ix].isCharging()){
+        chargeCnt++;
+
+        to100 = (((100.0 - g_stack.batts[ix].soc) / 100.0 ) * g_stack.batts[ix].capacity) / g_stack.batts[ix].current;
+        if (g_stack.batts[ix].soc < 80) to80  = (((80.0 - g_stack.batts[ix].soc) / 100.0 )  * g_stack.batts[ix].capacity) / g_stack.batts[ix].current;
+        if (g_stack.batts[ix].soc < 60) to60  = (((60.0 - g_stack.batts[ix].soc) / 100.0 )  * g_stack.batts[ix].capacity) / g_stack.batts[ix].current;
+        if (g_stack.batts[ix].soc < 40) to40  = (((40.0 - g_stack.batts[ix].soc) / 100.0 )  * g_stack.batts[ix].capacity) / g_stack.batts[ix].current;
+        if (g_stack.batts[ix].soc < 20) to20  = (((20.0 - g_stack.batts[ix].soc) / 100.0 )  * g_stack.batts[ix].capacity) / g_stack.batts[ix].current;
+        
+        g_stack.batts[ix].hoursToCharge = to100;
+        g_stack.hoursToCharge += g_stack.batts[ix].hoursToCharge;
+      }
+      else if(g_stack.batts[ix].isDischarging()){
+        dischargeCnt++;
+
+        if (g_stack.batts[ix].soc > 80) to80  = (((g_stack.batts[ix].soc - 80.0) / 100.0 ) * g_stack.batts[ix].capacity) / (g_stack.batts[ix].current * -1);
+        if (g_stack.batts[ix].soc > 60) to60  = (((g_stack.batts[ix].soc - 60.0) / 100.0 ) * g_stack.batts[ix].capacity) / (g_stack.batts[ix].current * -1);
+        if (g_stack.batts[ix].soc > 40) to40  = (((g_stack.batts[ix].soc - 40.0) / 100.0 ) * g_stack.batts[ix].capacity) / (g_stack.batts[ix].current * -1);
+        if (g_stack.batts[ix].soc > 20) to20  = (((g_stack.batts[ix].soc - 20.0) / 100.0 ) * g_stack.batts[ix].capacity) / (g_stack.batts[ix].current * -1);
+        to0  =  (((g_stack.batts[ix].soc) / 100.0 )  * g_stack.batts[ix].capacity) / (g_stack.batts[ix].current * -1);
+
+        g_stack.batts[ix].hoursToDischarge = to20;
+        g_stack.hoursToDischarge += g_stack.batts[ix].hoursToDischarge;
+      }
       else if(g_stack.batts[ix].isIdle()){idleCnt++;}
       else{ alarmCnt++; } //should not really happen!
 
@@ -587,9 +626,13 @@ bool parsePwrResponse(const char* pStr)
         if(tempHigh < g_stack.batts[ix].cellTempHigh){tempHigh = g_stack.batts[ix].cellTempHigh;}
         if(tempLow > g_stack.batts[ix].cellTempLow){tempLow = g_stack.batts[ix].cellTempLow;}
       }
-      
+
+      snprintf(g_stack.batts[ix].socPoints, 99, "[%.2f, %.2f, %.2f, %.2f, %.2f, %.2f ]", to0, to20, to40, to60, to80, to100);
     }
   }
+
+  if (chargeCnt > 0) g_stack.hoursToCharge =  g_stack.hoursToCharge / (double)chargeCnt;
+  if (dischargeCnt > 0) g_stack.hoursToDischarge =  g_stack.hoursToDischarge / (double)dischargeCnt;
 
   //now update stack state:
   g_stack.avgVoltage /= g_stack.batteryCount;
@@ -708,12 +751,57 @@ void mqtt_publish_s(const char* topic, const char* newValue, const char* oldValu
 
 void pushBatteryDataToMqtt(const batteryStack& lastSentData, bool forceUpdate /* if true - we will send all data regardless if it's the same */)
 {
+  char szTopic[50];
+  
   mqtt_publish_f(MQTT_TOPIC_ROOT "soc",          g_stack.soc,                lastSentData.soc,                0, forceUpdate);
-  mqtt_publish_f(MQTT_TOPIC_ROOT "temp",         (float)g_stack.temp/1000.0, (float)lastSentData.temp/1000.0, 0, forceUpdate);
-  mqtt_publish_i(MQTT_TOPIC_ROOT "estPowerAC",   g_stack.getEstPowerAc(),    lastSentData.getEstPowerAc(),   10, forceUpdate);
+  mqtt_publish_f(MQTT_TOPIC_ROOT "temp",         g_stack.temp,               lastSentData.temp,               0, forceUpdate);
+  mqtt_publish_i(MQTT_TOPIC_ROOT "estPowerAC",   g_stack.getEstPowerAc(),    lastSentData.getEstPowerAc(),    10, forceUpdate);
   mqtt_publish_i(MQTT_TOPIC_ROOT "battery_count",g_stack.batteryCount,       lastSentData.batteryCount,       0, forceUpdate);
   mqtt_publish_s(MQTT_TOPIC_ROOT "base_state",   g_stack.baseState,          lastSentData.baseState            , forceUpdate);
   mqtt_publish_i(MQTT_TOPIC_ROOT "is_normal",    g_stack.isNormal() ? 1:0,   lastSentData.isNormal() ? 1:0,   0, forceUpdate);
+
+  
+  mqtt_publish_f(MQTT_TOPIC_ROOT "time_to_full",     g_stack.hoursToCharge,       lastSentData.hoursToCharge,       0, forceUpdate);
+  mqtt_publish_f(MQTT_TOPIC_ROOT "time_to_empty",    g_stack.hoursToDischarge,    lastSentData.hoursToDischarge,    0, forceUpdate);
+
+  // loop though all batteries
+  for(int ix=0; ix<MAX_PYLON_BATTERIES; ix++){
+    if (g_stack.batts[ix].isPresent) {
+
+      
+      snprintf(szTopic, sizeof(szTopic)-1, "%s%d/voltage", MQTT_TOPIC_ROOT, ix);
+      mqtt_publish_f(szTopic,      g_stack.batts[ix].voltage,            lastSentData.batts[ix].voltage,            0, forceUpdate);
+      
+      snprintf(szTopic, sizeof(szTopic)-1, "%s%d/current", MQTT_TOPIC_ROOT, ix);
+      mqtt_publish_f(szTopic,      g_stack.batts[ix].current,            lastSentData.batts[ix].current,            0, forceUpdate);
+      
+      snprintf(szTopic, sizeof(szTopic)-1, "%s%d/temp", MQTT_TOPIC_ROOT, ix);
+      mqtt_publish_f(szTopic,         g_stack.batts[ix].tempr,              lastSentData.batts[ix].tempr,              0, forceUpdate);
+      
+      snprintf(szTopic, sizeof(szTopic)-1, "%s%d/soc", MQTT_TOPIC_ROOT, ix);
+      mqtt_publish_f(szTopic,          g_stack.batts[ix].soc,                lastSentData.batts[ix].soc,                0, forceUpdate);
+
+      snprintf(szTopic, sizeof(szTopic)-1, "%s%d/time_to_full", MQTT_TOPIC_ROOT, ix);
+      mqtt_publish_f(szTopic,      g_stack.batts[ix].hoursToCharge,            lastSentData.batts[ix].hoursToCharge,            0, forceUpdate);
+
+      snprintf(szTopic, sizeof(szTopic)-1, "%s%d/time_to_empty", MQTT_TOPIC_ROOT, ix);
+      mqtt_publish_f(szTopic,      g_stack.batts[ix].hoursToDischarge,            lastSentData.batts[ix].hoursToDischarge,            0, forceUpdate);
+
+      snprintf(szTopic, sizeof(szTopic)-1, "%s%d/soc_points", MQTT_TOPIC_ROOT, ix);
+      mqtt_publish_s(szTopic,      g_stack.batts[ix].socPoints,            lastSentData.batts[ix].socPoints,            forceUpdate);
+
+      //g_stack.batts[ix].voltage = extractInt(pLineStart, 6);
+      //g_stack.batts[ix].current = extractInt(pLineStart, 13);
+      //g_stack.batts[ix].tempr   = extractInt(pLineStart, 20);
+      //g_stack.batts[ix].cellTempLow    = extractInt(pLineStart, 27);
+      //g_stack.batts[ix].cellTempHigh   = extractInt(pLineStart, 34);
+      //g_stack.batts[ix].cellVoltLow    = extractInt(pLineStart, 41);
+      //g_stack.batts[ix].cellVoltHigh   = extractInt(pLineStart, 48);
+      //g_stack.batts[ix].soc            = extractInt(pLineStart, 91);
+    }
+  }
+
+ 
 }
 
 void mqttLoop()
@@ -737,6 +825,7 @@ void mqttLoop()
     g_lastConnectionAttempt = os_getCurrentTimeSec();
   }
 
+  
   //next: read data from battery and send via MQTT (but only once per MQTT_PUSH_FREQ_SEC seconds)
   static unsigned long g_lastDataSent = 0;
   if(mqttClient.connected() && 
