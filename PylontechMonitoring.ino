@@ -10,8 +10,8 @@
 #include <DateTime.h>
 
 //IMPORTANT: Specify your WIFI settings:
-#define WIFI_SSID <YOUR_SSID>
-#define WIFI_PASS <YOUR_PWD>
+#define WIFI_SSID "...."
+#define WIFI_PASS "...."
 
 //IMPORTANT: Uncomment this line if you want to enable MQTT (and fill correct MQTT_ values below):
 #define ENABLE_MQTT
@@ -19,10 +19,10 @@
 #ifdef ENABLE_MQTT
 //NOTE 1: if you want to change what is pushed via MQTT - edit function: pushBatteryDataToMqtt.
 //NOTE 2: MQTT_TOPIC_ROOT is where battery will push MQTT topics. For example "soc" will be pushed to: "home/grid_battery/soc"
-#define MQTT_SERVER        <YOUR_MQTT_SERVER<
+#define MQTT_SERVER        "10.0.1.45"
 #define MQTT_PORT          1883
-#define MQTT_USER          ""
-#define MQTT_PASSWORD      ""
+#define MQTT_USER          "inverter"
+#define MQTT_PASSWORD      "inverter"
 #define MQTT_TOPIC_ROOT    "home/grid_battery/"  //this is where mqtt data will be pushed
 #define MQTT_PUSH_FREQ_SEC 10  //maximum mqtt update frequency in seconds
 
@@ -65,7 +65,7 @@ void setup() {
     delay(1000);
   }
 
-  ArduinoOTA.setHostname("GarageBattery");
+  ArduinoOTA.setHostname("PylontechBattery");
   ArduinoOTA.begin();
   server.on("/", handleRoot);
   server.on("/log", handleLog);
@@ -266,7 +266,7 @@ void handleRoot() {
   val -= minutes*60;
   
   static char szTmp[2500] = "";  
-  snprintf(szTmp, sizeof(szTmp)-1, "<html><b>Garage Battery</b><br>Time GMT: %d/%02d/%02d %02d:%02d:%02d (%s)<br>Uptime: %02d:%02d:%02d.%02d<br><br>free heap: %u<br>Wifi RSSI: %d<BR>Wifi SSID: %s", 
+  snprintf(szTmp, sizeof(szTmp)-1, "<html><b>Pylontech Battery</b><br>Time GMT: %d/%02d/%02d %02d:%02d:%02d (%s)<br>Uptime: %02d:%02d:%02d.%02d<br><br>free heap: %u<br>Wifi RSSI: %d<BR>Wifi SSID: %s", 
             year(), month(), day(), hour(), minute(), second(), "GMT",
             (int)days, (int)hours, (int)minutes, (int)val, 
             ESP.getFreeHeap(), WiFi.RSSI(), WiFi.SSID().c_str());
@@ -344,7 +344,7 @@ void wakeUpConsole()
 #define MAX_PYLON_BATTERIES 8
 
 // Battery capacities in Ah
-double battCapacity[MAX_PYLON_BATTERIES] = {74.0,74.0,74.0,74.0, 74.0,74.0,74.0,74.0};
+double battCapacity[MAX_PYLON_BATTERIES] = {74.0,74.0,74.0,74.0,74.0,74.0,74.0,74.0};
 
 struct pylonBattery
 {
@@ -760,9 +760,8 @@ void pushBatteryDataToMqtt(const batteryStack& lastSentData, bool forceUpdate /*
   mqtt_publish_s(MQTT_TOPIC_ROOT "base_state",   g_stack.baseState,          lastSentData.baseState            , forceUpdate);
   mqtt_publish_i(MQTT_TOPIC_ROOT "is_normal",    g_stack.isNormal() ? 1:0,   lastSentData.isNormal() ? 1:0,   0, forceUpdate);
 
-  
-  mqtt_publish_f(MQTT_TOPIC_ROOT "time_to_full",     g_stack.hoursToCharge,       lastSentData.hoursToCharge,       0, forceUpdate);
-  mqtt_publish_f(MQTT_TOPIC_ROOT "time_to_empty",    g_stack.hoursToDischarge,    lastSentData.hoursToDischarge,    0, forceUpdate);
+  if (g_stack.hoursToCharge < 24.0)  mqtt_publish_f(MQTT_TOPIC_ROOT "time_to_full",     g_stack.hoursToCharge,       lastSentData.hoursToCharge,       0, forceUpdate);
+  if (g_stack.hoursToDischarge < 24.0) mqtt_publish_f(MQTT_TOPIC_ROOT "time_to_empty",    g_stack.hoursToDischarge,    lastSentData.hoursToDischarge,    0, forceUpdate);
 
   // loop though all batteries
   for(int ix=0; ix<MAX_PYLON_BATTERIES; ix++){
@@ -782,22 +781,15 @@ void pushBatteryDataToMqtt(const batteryStack& lastSentData, bool forceUpdate /*
       mqtt_publish_f(szTopic,          g_stack.batts[ix].soc,                lastSentData.batts[ix].soc,                0, forceUpdate);
 
       snprintf(szTopic, sizeof(szTopic)-1, "%s%d/time_to_full", MQTT_TOPIC_ROOT, ix);
-      mqtt_publish_f(szTopic,      g_stack.batts[ix].hoursToCharge,            lastSentData.batts[ix].hoursToCharge,            0, forceUpdate);
+      if (g_stack.batts[ix].hoursToCharge < 24.0) mqtt_publish_f(szTopic,      g_stack.batts[ix].hoursToCharge,            lastSentData.batts[ix].hoursToCharge,            0, forceUpdate);
 
       snprintf(szTopic, sizeof(szTopic)-1, "%s%d/time_to_empty", MQTT_TOPIC_ROOT, ix);
-      mqtt_publish_f(szTopic,      g_stack.batts[ix].hoursToDischarge,            lastSentData.batts[ix].hoursToDischarge,            0, forceUpdate);
+      if (g_stack.batts[ix].hoursToDischarge < 24.0)  mqtt_publish_f(szTopic,      g_stack.batts[ix].hoursToDischarge,            lastSentData.batts[ix].hoursToDischarge,            0, forceUpdate);
 
       snprintf(szTopic, sizeof(szTopic)-1, "%s%d/soc_points", MQTT_TOPIC_ROOT, ix);
       mqtt_publish_s(szTopic,      g_stack.batts[ix].socPoints,            lastSentData.batts[ix].socPoints,            forceUpdate);
 
-      //g_stack.batts[ix].voltage = extractInt(pLineStart, 6);
-      //g_stack.batts[ix].current = extractInt(pLineStart, 13);
-      //g_stack.batts[ix].tempr   = extractInt(pLineStart, 20);
-      //g_stack.batts[ix].cellTempLow    = extractInt(pLineStart, 27);
-      //g_stack.batts[ix].cellTempHigh   = extractInt(pLineStart, 34);
-      //g_stack.batts[ix].cellVoltLow    = extractInt(pLineStart, 41);
-      //g_stack.batts[ix].cellVoltHigh   = extractInt(pLineStart, 48);
-      //g_stack.batts[ix].soc            = extractInt(pLineStart, 91);
+
     }
   }
 
@@ -812,7 +804,7 @@ void mqttLoop()
   //first: let's make sure we are connected to mqtt
   const char* topicLastWill = MQTT_TOPIC_ROOT "availability";
   if (!mqttClient.connected() && (g_lastConnectionAttempt == 0 || os_getCurrentTimeSec() - g_lastConnectionAttempt > 60)) {
-    if(mqttClient.connect("GarageBattery", MQTT_USER, MQTT_PASSWORD, topicLastWill, 1, true, "offline"))
+    if(mqttClient.connect("PylontechBattery", MQTT_USER, MQTT_PASSWORD, topicLastWill, 1, true, "offline"))
     {
       Log("Connected to MQTT server: " MQTT_SERVER);
       mqttClient.publish(topicLastWill, "online", true);
