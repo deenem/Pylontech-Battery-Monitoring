@@ -10,8 +10,8 @@
 #include <DateTime.h>
 
 //IMPORTANT: Specify your WIFI settings:
-#define WIFI_SSID "...."
-#define WIFI_PASS "...."
+#define WIFI_SSID "47 Ivy Road C"
+#define WIFI_PASS "..."
 
 //IMPORTANT: Uncomment this line if you want to enable MQTT (and fill correct MQTT_ values below):
 #define ENABLE_MQTT
@@ -26,6 +26,7 @@
 #define MQTT_TOPIC_ROOT    "home/grid_battery/"  //this is where mqtt data will be pushed
 #define MQTT_PUSH_FREQ_SEC 10  //maximum mqtt update frequency in seconds
 
+#define MAX_TTC 24.0 // Time to charge/discharge can be 1000's of hours which is useless, so limit to 20
 #include <PubSubClient.h>
 WiFiClient espClient;
 PubSubClient mqttClient(espClient);
@@ -627,7 +628,7 @@ bool parsePwrResponse(const char* pStr)
         if(tempLow > g_stack.batts[ix].cellTempLow){tempLow = g_stack.batts[ix].cellTempLow;}
       }
 
-      snprintf(g_stack.batts[ix].socPoints, 99, "[%.2f, %.2f, %.2f, %.2f, %.2f, %.2f ]", to0, to20, to40, to60, to80, to100);
+      snprintf(g_stack.batts[ix].socPoints, 99, "[%.2f, %.2f, %.2f, %.2f, %.2f, %.2f ]", min(to0, MAX_TTC), min(to20, MAX_TTC), min(to40, MAX_TTC), min(to60, MAX_TTC), min(to80, MAX_TTC), min(to100, MAX_TTC));
     }
   }
 
